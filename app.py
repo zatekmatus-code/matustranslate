@@ -12,11 +12,11 @@ from pdf2docx import Converter
 # --- Nastavenie stránky ---
 st.set_page_config(
     page_title="AI Prekladač Dokumentov",
-    page_icon="🌐",
+    page_icon="⚡",
     layout="centered"
 )
 
-st.title("🌐 AI Prekladač Dokumentov (Rýchly)")
+st.title("⚡ AI Prekladač Dokumentov (Ultra-Rýchly)")
 st.caption("Prekladaj DOCX, XLSX, PPTX a PDF so zachovaním pôvodného formátovania a tabuliek.")
 
 # --- Správa API kľúča ---
@@ -40,7 +40,6 @@ def translate_batch(text_list: list[str], target_language: str) -> list[str]:
     if not text_list:
         return []
     
-    # Ak je v zozname len 1 položka
     combined_text = DELIMITER.join(text_list)
 
     prompt = f"""You are a professional context-aware translator.
@@ -78,48 +77,62 @@ Text to translate:
         st.error(f"Chyba pri batch preklade: {e}")
         return text_list
 
-def process_in_batches(elements: list, get_text_fn, set_text_fn, target_lang: str, batch_size: int = 25):
-    """Pomocná funkcia na rozsekane prvkov do dávok a ich hromadný preklad."""
+def process_in_batches(elements: list, get_text_fn, set_text_fn, target_lang: str, batch_size: int = 60):
+    """Spracováva texty vo veľkých dávkach (60 položiek naraz) s progresom."""
     valid_elements = [el for el in elements if get_text_fn(el) and get_text_fn(el).strip()]
+    total_elements = len(valid_elements)
     
-    for i in range(0, len(valid_elements), batch_size):
+    if total_elements == 0:
+        return
+
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+
+    for i in range(0, total_elements, batch_size):
         batch = valid_elements[i:i + batch_size]
         texts = [get_text_fn(el) for el in batch]
+        
+        # Aktualizácia progresu
+        current_progress = min((i + len(batch)) / total_elements, 1.0)
+        progress_bar.progress(current_progress)
+        status_text.text(f"⚡ Preložených {i + len(batch)} / {total_elements} blokov textu...")
+
         translated_texts = translate_batch(texts, target_lang)
         
         for el, trans_text in zip(batch, translated_texts):
             set_text_fn(el, trans_text)
 
+    progress_bar.empty()
+    status_text.empty()
+
 # --- Funkcie pre spracovanie dokumentov ---
 
 def process_docx(file_bytes: bytes, target_lang: str) -> bytes:
     doc = Document(io.BytesIO(file_bytes))
-    status_text = st.empty()
     
     # 1. Odseky
-    status_text.text("⏳ Dávkový preklad odsekov...")
     paragraphs = [p for p in doc.paragraphs if p.text.strip()]
-    process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
+    if paragraphs:
+        st.caption("📝 Prekladám odseky...")
+        process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
 
     # 2. Tabuľky
-    status_text.text("⏳ Dávkový preklad tabuliek...")
     cells = []
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 if cell.text.strip():
                     cells.append(cell)
-    process_in_batches(cells, lambda c: c.text, lambda c, t: setattr(c, 'text', t), target_lang)
+    if cells:
+        st.caption("📊 Prekladám tabuľky...")
+        process_in_batches(cells, lambda c: c.text, lambda c, t: setattr(c, 'text', t), target_lang)
 
-    status_text.empty()
     output = io.BytesIO()
     doc.save(output)
     return output.getvalue()
 
 def process_xlsx(file_bytes: bytes, target_lang: str) -> bytes:
     wb = load_workbook(filename=io.BytesIO(file_bytes))
-    status_text = st.empty()
-    status_text.text("⏳ Dávkový preklad Excelu...")
     
     cells = []
     for sheet in wb.worksheets:
@@ -129,17 +142,16 @@ def process_xlsx(file_bytes: bytes, target_lang: str) -> bytes:
                     if cell.value.strip():
                         cells.append(cell)
                         
-    process_in_batches(cells, lambda c: str(c.value), lambda c, t: setattr(c, 'value', t), target_lang)
+    if cells:
+        st.caption("📊 Prekladám Excel hárky...")
+        process_in_batches(cells, lambda c: str(c.value), lambda c, t: setattr(c, 'value', t), target_lang)
 
-    status_text.empty()
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
 def process_pptx(file_bytes: bytes, target_lang: str) -> bytes:
     prs = Presentation(io.BytesIO(file_bytes))
-    status_text = st.empty()
-    status_text.text("⏳ Dávkový preklad prezentácie...")
     
     paragraphs = []
     for slide in prs.slides:
@@ -154,16 +166,16 @@ def process_pptx(file_bytes: bytes, target_lang: str) -> bytes:
                         if cell.text.strip():
                             paragraphs.append(cell)
 
-    process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
+    if paragraphs:
+        st.caption("🖼️ Prekladám snímky prezentácie...")
+        process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
 
-    status_text.empty()
     output = io.BytesIO()
     prs.save(output)
     return output.getvalue()
 
 def process_pdf(file_bytes: bytes, target_lang: str) -> bytes:
-    status_text = st.empty()
-    status_text.text("⏳ Konvertujem PDF na upraviteľný dokument...")
+    status_info = st.info("⚙️ Prebieha konverzia PDF rozloženia na upraviteľný DOCX formát...")
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
         temp_pdf.write(file_bytes)
@@ -176,10 +188,11 @@ def process_pdf(file_bytes: bytes, target_lang: str) -> bytes:
         cv.convert(temp_docx_path)
         cv.close()
 
+        status_info.empty()
+
         with open(temp_docx_path, "rb") as f:
             docx_bytes = f.read()
 
-        status_text.empty()
         translated_docx_bytes = process_docx(docx_bytes, target_lang)
         return translated_docx_bytes
 
@@ -217,38 +230,37 @@ if uploaded_file and st.button("🚀 Spustiť preklad", type="primary"):
     file_bytes = uploaded_file.read()
     file_ext = uploaded_file.name.split(".")[-1].lower()
     
-    with st.spinner("Prekladám dokument. Prosím počkaj..."):
-        try:
-            if file_ext == "docx":
-                result_bytes = process_docx(file_bytes, target_language)
-                mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                out_ext = "docx"
-            elif file_ext == "xlsx":
-                result_bytes = process_xlsx(file_bytes, target_language)
-                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                out_ext = "xlsx"
-            elif file_ext == "pptx":
-                result_bytes = process_pptx(file_bytes, target_language)
-                mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                out_ext = "pptx"
-            elif file_ext == "pdf":
-                result_bytes = process_pdf(file_bytes, target_language)
-                mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                out_ext = "docx"
-            else:
-                st.error("Nepodporovaný formát súboru.")
-                st.stop()
-                
-            st.success("✅ Preklad je dokončený!")
+    try:
+        if file_ext == "docx":
+            result_bytes = process_docx(file_bytes, target_language)
+            mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            out_ext = "docx"
+        elif file_ext == "xlsx":
+            result_bytes = process_xlsx(file_bytes, target_language)
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            out_ext = "xlsx"
+        elif file_ext == "pptx":
+            result_bytes = process_pptx(file_bytes, target_language)
+            mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            out_ext = "pptx"
+        elif file_ext == "pdf":
+            result_bytes = process_pdf(file_bytes, target_language)
+            mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            out_ext = "docx"
+        else:
+            st.error("Nepodporovaný formát súboru.")
+            st.stop()
             
-            base_name = uploaded_file.name.rsplit('.', 1)[0]
-            output_filename = f"prelozene_{base_name}.{out_ext}"
-            
-            st.download_button(
-                label=f"📥 Stiahnuť preložený súbor ({output_filename})",
-                data=result_bytes,
-                file_name=output_filename,
-                mime=mime
-            )
-        except Exception as e:
-            st.error(f"Vyskytla sa chyba pri spracovaní súboru: {e}")
+        st.success("✅ Preklad bol úspešne dokončený!")
+        
+        base_name = uploaded_file.name.rsplit('.', 1)[0]
+        output_filename = f"prelozene_{base_name}.{out_ext}"
+        
+        st.download_button(
+            label=f"📥 Stiahnuť preložený súbor ({output_filename})",
+            data=result_bytes,
+            file_name=output_filename,
+            mime=mime
+        )
+    except Exception as e:
+        st.error(f"Vyskytla sa chyba pri spracovaní súboru: {e}")
