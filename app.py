@@ -16,7 +16,7 @@ st.set_page_config(
     layout="centered"
 )
 
-st.title("🌐 AI Prekladač Dokumentov")
+st.title("🌐 AI Prekladač Dokumentov (Rýchly)")
 st.caption("Prekladaj DOCX, XLSX, PPTX a PDF so zachovaním pôvodného formátovania a tabuliek.")
 
 # --- Správa API kľúča ---
@@ -33,58 +33,83 @@ if not api_key:
 # Inicializácia Gemini klienta
 client = genai.Client(api_key=api_key)
 
-# --- Pomocná funkcia na preklad cez Gemini ---
-def translate_text(text: str, target_language: str) -> str:
-    """Preloží text pomocou Gemini 2.5 Flash. Automaticky deteguje zdrojový jazyk."""
-    if not text or not text.strip():
-        return text
+DELIMITER = "\n===ITEM_DELIMITER===\n"
+
+def translate_batch(text_list: list[str], target_language: str) -> list[str]:
+    """Preloží celý zoznam textov v jedinom API volaní."""
+    if not text_list:
+        return []
+    
+    # Ak je v zozname len 1 položka
+    combined_text = DELIMITER.join(text_list)
 
     prompt = f"""You are a professional context-aware translator.
-Task: Translate the following text into target language: '{target_language}'.
+Task: Translate each segment of the following text into target language: '{target_language}'.
 Rules:
 1. Automatically detect the source language.
-2. Preserve all original line breaks, formatting variables, placeholders, numbers, and technical terminology.
-3. Return ONLY the translation, with no explanation or meta-text.
+2. Maintain the EXACT same layout, formatting variables, placeholders, numbers, and technical terminology.
+3. The segments are separated by the exact delimiter string: '===ITEM_DELIMITER==='.
+4. Return the translated segments separated by the EXACT SAME delimiter '===ITEM_DELIMITER==='.
+5. Do NOT alter, add, or remove delimiters. Return ONLY the translated segments and delimiters.
 
 Text to translate:
-{text}"""
+{combined_text}"""
 
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.1,  # Nízka teplota pre presný preklad
+                temperature=0.1,
             )
         )
-        return response.text.strip() if response.text else text
+        if not response.text:
+            return text_list
+            
+        translated_segments = response.text.strip().split("===ITEM_DELIMITER===")
+        translated_segments = [s.strip() for s in translated_segments]
+        
+        # Ak model náhodou nesprávne vrátil počet častí, použije pôvodný text ako zálohu
+        if len(translated_segments) == len(text_list):
+            return translated_segments
+        else:
+            return text_list
     except Exception as e:
-        st.error(f"Chyba pri komunikácii s API: {e}")
-        return text
+        st.error(f"Chyba pri batch preklade: {e}")
+        return text_list
+
+def process_in_batches(elements: list, get_text_fn, set_text_fn, target_lang: str, batch_size: int = 25):
+    """Pomocná funkcia na rozsekane prvkov do dávok a ich hromadný preklad."""
+    valid_elements = [el for el in elements if get_text_fn(el) and get_text_fn(el).strip()]
+    
+    for i in range(0, len(valid_elements), batch_size):
+        batch = valid_elements[i:i + batch_size]
+        texts = [get_text_fn(el) for el in batch]
+        translated_texts = translate_batch(texts, target_lang)
+        
+        for el, trans_text in zip(batch, translated_texts):
+            set_text_fn(el, trans_text)
 
 # --- Funkcie pre spracovanie dokumentov ---
 
 def process_docx(file_bytes: bytes, target_lang: str) -> bytes:
-    """Spracuje DOCX súbor - preloží odseky a tabuľky, pričom zachová odsekové štýly a formátovanie."""
     doc = Document(io.BytesIO(file_bytes))
-    
     status_text = st.empty()
-    status_text.text("⏳ Prekladám odseky v dokumente...")
     
-    # 1. Preklad obyčajných odsekov
-    for p in doc.paragraphs:
-        if p.text.strip():
-            translated = translate_text(p.text, target_lang)
-            p.text = translated
+    # 1. Odseky
+    status_text.text("⏳ Dávkový preklad odsekov...")
+    paragraphs = [p for p in doc.paragraphs if p.text.strip()]
+    process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
 
-    # 2. Preklad tabuliek
-    status_text.text("⏳ Prekladám tabuľky v dokumente...")
+    # 2. Tabuľky
+    status_text.text("⏳ Dávkový preklad tabuliek...")
+    cells = []
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 if cell.text.strip():
-                    translated = translate_text(cell.text, target_lang)
-                    cell.text = translated
+                    cells.append(cell)
+    process_in_batches(cells, lambda c: c.text, lambda c, t: setattr(c, 'text', t), target_lang)
 
     status_text.empty()
     output = io.BytesIO()
@@ -92,18 +117,19 @@ def process_docx(file_bytes: bytes, target_lang: str) -> bytes:
     return output.getvalue()
 
 def process_xlsx(file_bytes: bytes, target_lang: str) -> bytes:
-    """Spracuje XLSX súbor - preloží hodnoty buniek bez porušenia vzorcov a štýlov."""
     wb = load_workbook(filename=io.BytesIO(file_bytes))
     status_text = st.empty()
-    status_text.text("⏳ Prekladám hárky v Exceli...")
+    status_text.text("⏳ Dávkový preklad Excelu...")
     
+    cells = []
     for sheet in wb.worksheets:
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str) and not cell.value.startswith("="):
                     if cell.value.strip():
-                        translated = translate_text(cell.value, target_lang)
-                        cell.value = translated
+                        cells.append(cell)
+                        
+    process_in_batches(cells, lambda c: str(c.value), lambda c, t: setattr(c, 'value', t), target_lang)
 
     status_text.empty()
     output = io.BytesIO()
@@ -111,25 +137,24 @@ def process_xlsx(file_bytes: bytes, target_lang: str) -> bytes:
     return output.getvalue()
 
 def process_pptx(file_bytes: bytes, target_lang: str) -> bytes:
-    """Spracuje PPTX súbor - preloží textové polia a tabuľky v snímkach."""
     prs = Presentation(io.BytesIO(file_bytes))
     status_text = st.empty()
+    status_text.text("⏳ Dávkový preklad prezentácie...")
     
-    for i, slide in enumerate(prs.slides):
-        status_text.text(f"⏳ Prekladám snímku {i+1} z {len(prs.slides)}...")
+    paragraphs = []
+    for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame:
-                for paragraph in shape.text_frame.paragraphs:
-                    if paragraph.text.strip():
-                        translated = translate_text(paragraph.text, target_lang)
-                        paragraph.text = translated
-            
+                for p in shape.text_frame.paragraphs:
+                    if p.text.strip():
+                        paragraphs.append(p)
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         if cell.text.strip():
-                            translated = translate_text(cell.text, target_lang)
-                            cell.text = translated
+                            paragraphs.append(cell)
+
+    process_in_batches(paragraphs, lambda p: p.text, lambda p, t: setattr(p, 'text', t), target_lang)
 
     status_text.empty()
     output = io.BytesIO()
@@ -137,7 +162,6 @@ def process_pptx(file_bytes: bytes, target_lang: str) -> bytes:
     return output.getvalue()
 
 def process_pdf(file_bytes: bytes, target_lang: str) -> bytes:
-    """Prekonvertuje PDF na DOCX, preloží ho a vráti výsledný vygenerovaný DOCX súbor."""
     status_text = st.empty()
     status_text.text("⏳ Konvertujem PDF na upraviteľný dokument...")
     
