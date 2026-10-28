@@ -68,17 +68,17 @@ Text to translate:
         translated_segments = response.text.strip().split("===ITEM_DELIMITER===")
         translated_segments = [s.strip() for s in translated_segments]
         
-        # Ak model náhodou nesprávne vrátil počet častí, použije pôvodný text ako zálohu
+        # Ak model vrátil správny počet častí
         if len(translated_segments) == len(text_list):
             return translated_segments
         else:
             return text_list
     except Exception as e:
-        st.error(f"Chyba pri batch preklade: {e}")
+        st.error(f"Chyba pri API volaní Gemini: {e}")
         return text_list
 
 def process_in_batches(elements: list, get_text_fn, set_text_fn, target_lang: str, batch_size: int = 60):
-    """Spracováva texty vo veľkých dávkach (60 položiek naraz) s progresom."""
+    """Spracováva texty vo veľkých dávkach s ukazovateľom priebehu."""
     valid_elements = [el for el in elements if get_text_fn(el) and get_text_fn(el).strip()]
     total_elements = len(valid_elements)
     
@@ -92,7 +92,6 @@ def process_in_batches(elements: list, get_text_fn, set_text_fn, target_lang: st
         batch = valid_elements[i:i + batch_size]
         texts = [get_text_fn(el) for el in batch]
         
-        # Aktualizácia progresu
         current_progress = min((i + len(batch)) / total_elements, 1.0)
         progress_bar.progress(current_progress)
         status_text.text(f"⚡ Preložených {i + len(batch)} / {total_elements} blokov textu...")
@@ -185,7 +184,7 @@ def process_pdf(file_bytes: bytes, target_lang: str) -> bytes:
 
     try:
         cv = Converter(temp_pdf_path)
-        cv.convert(temp_docx_path)
+        cv.convert(temp_docx_path, start=0, end=None)
         cv.close()
 
         status_info.empty()
@@ -195,6 +194,11 @@ def process_pdf(file_bytes: bytes, target_lang: str) -> bytes:
 
         translated_docx_bytes = process_docx(docx_bytes, target_lang)
         return translated_docx_bytes
+
+    except Exception as pdf_err:
+        status_info.empty()
+        st.error(f"⚠️ Nepodarilo sa prekonvertovať PDF. Súbor je pravdepodobne príliš zložito štruktúrovaný alebo presahuje pamäťové limity servera. Skús ho najprv v počítači uložiť ako DOCX. Detail: {pdf_err}")
+        st.stop()
 
     finally:
         if os.path.exists(temp_pdf_path):
